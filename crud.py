@@ -1,276 +1,374 @@
 import sqlite3
 from datetime import datetime
 
-# --- Connexion à la base de données ---
+DB = "pharmacie.db"
+
 def connect_db():
-    conn = sqlite3.connect("pharmacie.db")
-    conn.execute("PRAGMA foreign_keys = ON;")  # Activer les clés étrangères
+    conn = sqlite3.connect(DB)
+    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
-# --- GESTION DES MÉDICAMENTS ---
+# --- Helpers validation ---
+def _is_valid_date(s):
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except Exception:
+        return False
 
-def ajouter_medicament(nom, code_barre, description, quantite, prix, date_expiration=None):
+def _is_future_date(s):
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return d > datetime.today().date()
+
+
+# MÉDICAMENTS
+
+def ajouter_medicament(nom, code_barre, description, quantite, prix, date_expiration):
+    # validations
+    if not nom or not nom.strip():
+        raise ValueError("Le nom du médicament ne peut pas être vide.")
+    if not code_barre or not code_barre.strip():
+        raise ValueError("Le code-barres ne peut pas être vide.")
+    try:
+        quantite = int(quantite)
+    except Exception:
+        raise ValueError("Quantité invalide.")
+    try:
+        prix = float(prix)
+    except Exception:
+        raise ValueError("Prix invalide.")
+
+    if quantite < 0:
+        raise ValueError("La quantité doit être >= 0.")
+    if prix < 0:
+        raise ValueError("Le prix doit être >= 0.")
+
+    if date_expiration:
+        if not _is_valid_date(date_expiration):
+            raise ValueError("Format date d'expiration invalide (YYYY-MM-DD).")
+        if not _is_future_date(date_expiration):
+            raise ValueError("La date d'expiration doit être une date future.")
 
     conn = connect_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
+    # unicité code-barre
+    cur.execute("SELECT id FROM medicaments WHERE code_barre = ?", (code_barre.strip(),))
+    if cur.fetchone():
+        conn.close()
+        raise ValueError("Un médicament avec ce code-barres existe déjà.")
 
     try:
-        cursor.execute("""
+        cur.execute("""
             INSERT INTO medicaments (nom, code_barre, description, quantite, prix, date_expiration)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (nom, code_barre, description, quantite, prix, date_expiration))
+        """, (nom.strip(), code_barre.strip(), description or "", quantite, prix, date_expiration))
         conn.commit()
-        print(f"Médicament '{nom}' ajouté avec succès.")
         return True
-    except sqlite3.IntegrityError:
-        print(f"Erreur : Un médicament avec le code-barres '{code_barre}' existe déjà.")
-        return False
-    except Exception as e:
-        print(f"Erreur lors de l'ajout du médicament : {e}")
-        return False
+    except sqlite3.IntegrityError as e:
+        raise ValueError("Erreur base de données (contrainte) : " + str(e))
     finally:
         conn.close()
 
-def afficher_medicaments():
-    
+def modifier_medicament(id_med, nom=None, quantite=None, prix=None, description=None, code_barre=None, date_expiration=None):
+    # id check
+    if id_med is None:
+        raise ValueError("ID médicament requis.")
+    try:
+        id_med = int(id_med)
+    except Exception:
+        raise ValueError("ID médicament invalide.")
+
+    # fetch existing to ensure exists
     conn = connect_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
+    cur.execute("SELECT id, code_barre FROM medicaments WHERE id = ?", (id_med,))
+    existing = cur.fetchone()
+    if not existing:
+        conn.close()
+        raise ValueError(f"Aucun médicament trouvé avec l'ID {id_med}.")
 
-    cursor.execute("SELECT id, nom, quantite, prix FROM medicaments")
-    resultats = cursor.fetchall()
+    # validations if provided
+    if nom is not None and not nom.strip():
+        conn.close()
+        raise ValueError("Le nom ne peut pas être vide.")
+    if code_barre is not None and not code_barre.strip():
+        conn.close()
+        raise ValueError("Le code-barres ne peut pas être vide.")
 
-    if not resultats:
-        print("Aucun médicament dans la base.")
-    else:
-        print("\n--- Liste des médicaments ---")
-        for med in resultats:
-            print(f"ID: {med[0]} | Nom: {med[1]} | Quantité: {med[2]} | Prix: {med[3]} €")
+    if quantite is not None:
+        try:
+            quantite = int(quantite)
+        except Exception:
+            conn.close()
+            raise ValueError("Quantité invalide.")
+        if quantite < 0:
+            conn.close()
+            raise ValueError("Quantité doit être >= 0.")
+    if prix is not None:
+        try:
+            prix = float(prix)
+        except Exception:
+            conn.close()
+            raise ValueError("Prix invalide.")
+        if prix < 0:
+            conn.close()
+            raise ValueError("Prix doit être >= 0.")
+    if date_expiration:
+        if not _is_valid_date(date_expiration):
+            conn.close()
+            raise ValueError("Format date d'expiration invalide (YYYY-MM-DD).")
+        if not _is_future_date(date_expiration):
+            conn.close()
+            raise ValueError("La date d'expiration doit être future.")
 
-    conn.close()
+    # check code_barre uniqueness if changed
+    if code_barre is not None:
+        cur.execute("SELECT id FROM medicaments WHERE code_barre = ? AND id != ?", (code_barre.strip(), id_med))
+        if cur.fetchone():
+            conn.close()
+            raise ValueError("Ce code-barres est déjà utilisé par un autre médicament.")
 
-def modifier_medicament(id, nom=None, quantite=None, prix=None):
-
-    conn = connect_db()
-    cursor = conn.cursor()
-
-    # Construction dynamique de la requête SQL
+    # build update dynamically (compatible avec appel depuis main)
     updates = []
     params = []
     if nom is not None:
-        updates.append("nom = ?")
-        params.append(nom)
+        updates.append("nom = ?"); params.append(nom.strip())
+    if code_barre is not None:
+        updates.append("code_barre = ?"); params.append(code_barre.strip())
+    if description is not None:
+        updates.append("description = ?"); params.append(description)
     if quantite is not None:
-        updates.append("quantite = ?")
-        params.append(quantite)
+        updates.append("quantite = ?"); params.append(quantite)
     if prix is not None:
-        updates.append("prix = ?")
-        params.append(prix)
+        updates.append("prix = ?"); params.append(prix)
+    if date_expiration is not None:
+        updates.append("date_expiration = ?"); params.append(date_expiration)
 
     if not updates:
-        print("Aucun champ à modifier.")
         conn.close()
-        return False
+        return True  # rien à faire
 
-    query = f"UPDATE medicaments SET {', '.join(updates)} WHERE id = ?"
-    params.append(id)
-
+    params.append(id_med)
+    q = f"UPDATE medicaments SET {', '.join(updates)} WHERE id = ?"
     try:
-        cursor.execute(query, params)
-        if cursor.rowcount == 0:
-            print(f"Aucun médicament trouvé avec l'ID {id}.")
-            return False
+        cur.execute(q, params)
+        if cur.rowcount == 0:
+            conn.close()
+            raise ValueError(f"Aucun médicament trouvé avec l'ID {id_med}.")
         conn.commit()
-        print(f"Médicament ID {id} modifié avec succès.")
         return True
-    except Exception as e:
-        print(f"Erreur lors de la modification : {e}")
-        return False
+    except sqlite3.IntegrityError as e:
+        raise ValueError("Erreur base (contrainte) : " + str(e))
     finally:
         conn.close()
 
-def supprimer_medicament(id):
-   
-    conn = connect_db()
-    cursor = conn.cursor()
-
+def supprimer_medicament(id_med):
     try:
-        cursor.execute("DELETE FROM medicaments WHERE id = ?", (id,))
-        if cursor.rowcount == 0:
-            print(f"Aucun médicament trouvé avec l'ID {id}.")
-            return False
+        id_med = int(id_med)
+    except Exception:
+        raise ValueError("ID médicament invalide.")
+    conn = connect_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM medicaments WHERE id = ?", (id_med,))
+        if cur.rowcount == 0:
+            conn.close()
+            raise ValueError(f"Aucun médicament trouvé avec l'ID {id_med}.")
         conn.commit()
-        print(f"Médicament ID {id} supprimé avec succès.")
         return True
     except sqlite3.IntegrityError:
-        print(f"Erreur : Impossible de supprimer le médicament ID {id} car des ventes existent.")
-        return False
-    except Exception as e:
-        print(f"Erreur lors de la suppression : {e}")
-        return False
+        conn.close()
+        raise ValueError("Impossible de supprimer le médicament : des ventes existent liées.")
     finally:
         conn.close()
 
-# --- GESTION DES CLIENTS ---
+
+# CLIENTS
 
 def ajouter_client(nom, prenom, naissance, phone=None, num_assurance=None):
-    """
-    Fonction pour ajouter un client dans la table clients.
-    """
-    conn = connect_db()
-    cursor = conn.cursor()
+    if not nom or not nom.strip():
+        raise ValueError("Nom obligatoire.")
+    if not prenom or not prenom.strip():
+        raise ValueError("Prénom obligatoire.")
+    if not naissance or not _is_valid_date(naissance):
+        raise ValueError("Date de naissance invalide (YYYY-MM-DD).")
+    if phone and phone.strip():
+        p = phone.strip()
+        if not (p.isdigit() or (p.startswith("+") and p[1:].isdigit())):
+            raise ValueError("Téléphone invalide (chiffres ou +chiffres).")
+        if len(p.replace("+","")) < 6:
+            raise ValueError("Téléphone trop court.")
+    if num_assurance and num_assurance.strip() and len(num_assurance.strip()) < 4:
+        raise ValueError("Numéro d'assurance trop court (min 4 caractères).")
 
+    conn = connect_db()
+    cur = conn.cursor()
     try:
-        cursor.execute("""
+        cur.execute("""
             INSERT INTO clients (nom, prenom, naissance, phone, num_assurance)
             VALUES (?, ?, ?, ?, ?)
-        """, (nom, prenom, naissance, phone, num_assurance))
+        """, (nom.strip(), prenom.strip(), naissance, (phone or "").strip(), (num_assurance or "").strip()))
         conn.commit()
-        print(f"Client '{prenom} {nom}' ajouté avec succès.")
         return True
-    except Exception as e:
-        print(f"Erreur lors de l'ajout du client : {e}")
-        return False
+    except sqlite3.IntegrityError as e:
+        raise ValueError("Erreur base (contrainte) : " + str(e))
     finally:
         conn.close()
 
-def afficher_clients():
-  
+def modifier_client(id_cli, nom=None, prenom=None, naissance=None, phone=None, num_assurance=None):
+    try:
+        idc = int(id_cli)
+    except Exception:
+        raise ValueError("ID client invalide.")
+
+    if nom is not None and not nom.strip():
+        raise ValueError("Nom vide.")
+    if prenom is not None and not prenom.strip():
+        raise ValueError("Prénom vide.")
+    if naissance is not None and not _is_valid_date(naissance):
+        raise ValueError("Date de naissance invalide (YYYY-MM-DD).")
+    if phone is not None and phone.strip():
+        p = phone.strip()
+        if not (p.isdigit() or (p.startswith("+") and p[1:].isdigit())):
+            raise ValueError("Téléphone invalide.")
+        if len(p.replace("+","")) < 6:
+            raise ValueError("Téléphone trop court.")
+    if num_assurance is not None and num_assurance.strip() and len(num_assurance.strip()) < 4:
+        raise ValueError("Numéro d'assurance trop court.")
+
     conn = connect_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id, nom, prenom FROM clients")
-    resultats = cursor.fetchall()
-
-    if not resultats:
-        print("Aucun client dans la base.")
-    else:
-        print("\n--- Liste des clients ---")
-        for cli in resultats:
-            print(f"ID: {cli[0]} | Nom: {cli[1]} | Prénom: {cli[2]}")
-
-    conn.close()
-
-def modifier_client(id, nom=None, prenom=None, phone=None):
-    
-    conn = connect_db()
-    cursor = conn.cursor()
-
-    updates = []
-    params = []
+    cur = conn.cursor()
+    updates = []; params = []
     if nom is not None:
-        updates.append("nom = ?")
-        params.append(nom)
+        updates.append("nom = ?"); params.append(nom.strip())
     if prenom is not None:
-        updates.append("prenom = ?")
-        params.append(prenom)
+        updates.append("prenom = ?"); params.append(prenom.strip())
+    if naissance is not None:
+        updates.append("naissance = ?"); params.append(naissance)
     if phone is not None:
-        updates.append("phone = ?")
-        params.append(phone)
+        updates.append("phone = ?"); params.append(phone.strip())
+    if num_assurance is not None:
+        updates.append("num_assurance = ?"); params.append(num_assurance.strip())
 
     if not updates:
-        print("Aucun champ à modifier.")
         conn.close()
-        return False
-
-    query = f"UPDATE clients SET {', '.join(updates)} WHERE id = ?"
-    params.append(id)
-
-    try:
-        cursor.execute(query, params)
-        if cursor.rowcount == 0:
-            print(f"Aucun client trouvé avec l'ID {id}.")
-            return False
-        conn.commit()
-        print(f"Client ID {id} modifié avec succès.")
         return True
-    except Exception as e:
-        print(f"Erreur lors de la modification : {e}")
-        return False
+
+    params.append(idc)
+    q = f"UPDATE clients SET {', '.join(updates)} WHERE id = ?"
+    try:
+        cur.execute(q, params)
+        if cur.rowcount == 0:
+            conn.close()
+            raise ValueError(f"Aucun client trouvé avec l'ID {idc}.")
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as e:
+        raise ValueError("Erreur base (contrainte) : " + str(e))
     finally:
         conn.close()
 
-def supprimer_client(id):
-   
+def supprimer_client(id_cli):
+    try:
+        idc = int(id_cli)
+    except Exception:
+        raise ValueError("ID client invalide.")
     conn = connect_db()
-    cursor = conn.cursor()
-
+    cur = conn.cursor()
     try:
-        cursor.execute("DELETE FROM clients WHERE id = ?", (id,))
-        if cursor.rowcount == 0:
-            print(f"Aucun client trouvé avec l'ID {id}.")
-            return False
+        cur.execute("DELETE FROM clients WHERE id = ?", (idc,))
+        if cur.rowcount == 0:
+            conn.close()
+            raise ValueError(f"Aucun client trouvé avec l'ID {idc}.")
         conn.commit()
-        print(f"Client ID {id} supprimé avec succès.")
         return True
-    except Exception as e:
-        print(f"Erreur lors de la suppression : {e}")
-        return False
     finally:
         conn.close()
 
-# --- GESTION DES VENTES ---
+
+# VENTES
 
 def enregistrer_vente(id_medicament, id_client, quantite, pharmacien="Inconnu"):
-   
+    # validations & conversions
+    try:
+        id_med = int(id_medicament)
+    except Exception:
+        raise ValueError("ID médicament invalide.")
+    try:
+        id_cli = int(id_client)
+    except Exception:
+        raise ValueError("ID client invalide.")
+    try:
+        qte = int(quantite)
+    except Exception:
+        raise ValueError("Quantité invalide.")
+    if qte <= 0:
+        raise ValueError("La quantité doit être > 0.")
+
     conn = connect_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
+
+    # vérifier médicament
+    cur.execute("SELECT prix, quantite FROM medicaments WHERE id = ?", (id_med,))
+    med = cur.fetchone()
+    if not med:
+        conn.close()
+        raise ValueError("Médicament introuvable.")
+    prix_unitaire, stock = med
+    if stock < qte:
+        conn.close()
+        raise ValueError(f"Stock insuffisant. Disponible: {stock}, demandé: {qte}.")
+
+    # vérifier client
+    cur.execute("SELECT id FROM clients WHERE id = ?", (id_cli,))
+    if not cur.fetchone():
+        conn.close()
+        raise ValueError("Client introuvable.")
+
+    prix_total = prix_unitaire * qte
 
     try:
-        # Récupérer le prix du médicament
-        cursor.execute("SELECT prix, quantite FROM medicaments WHERE id = ?", (id_medicament,))
-        result = cursor.fetchone()
-        if not result:
-            print(f"Erreur : Médicament ID {id_medicament} introuvable.")
-            return False
-
-        prix_unitaire, stock_actuel = result
-        if stock_actuel < quantite:
-            print(f"Erreur : Stock insuffisant. Disponible: {stock_actuel}, demandé: {quantite}.")
-            return False
-
-        prix_total = prix_unitaire * quantite
-
-        # Enregistrer la vente
-        cursor.execute("""
+        cur.execute("""
             INSERT INTO vente (id_medicament, id_client, quantite, prix_unitaire, prix_total, pharmacien)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (id_medicament, id_client, quantite, prix_unitaire, prix_total, pharmacien))
-
-        # Mettre à jour le stock
-        cursor.execute("""
-            UPDATE medicaments
-            SET quantite = quantite - ?
-            WHERE id = ?
-        """, (quantite, id_medicament))
-
+        """, (id_med, id_cli, qte, prix_unitaire, prix_total, pharmacien))
+        cur.execute("UPDATE medicaments SET quantite = quantite - ? WHERE id = ?", (qte, id_med))
         conn.commit()
-        print(f"Vente enregistrée : {quantite} x médicament ID {id_medicament} au client ID {id_client}.")
         return True
-    except Exception as e:
-        print(f"Erreur lors de l'enregistrement de la vente : {e}")
-        return False
+    except sqlite3.IntegrityError as e:
+        raise ValueError("Erreur base (contrainte) : " + str(e))
     finally:
         conn.close()
 
-def afficher_ventes():
-   
+# Utilitaires d'affichage (lectures)
+def fetch_medicaments():
     conn = connect_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
+    cur.execute("SELECT id, nom, code_barre, quantite, prix, date_expiration FROM medicaments")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
-    cursor.execute("""
+def fetch_clients():
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, nom, prenom, naissance, phone, num_assurance FROM clients")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def fetch_ventes():
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("""
         SELECT v.id, m.nom, c.nom, c.prenom, v.quantite, v.prix_total, v.date_vente
         FROM vente v
         LEFT JOIN medicaments m ON v.id_medicament = m.id
         LEFT JOIN clients c ON v.id_client = c.id
     """)
-    resultats = cursor.fetchall()
-
-    if not resultats:
-        print("Aucune vente enregistrée.")
-    else:
-        print("\n--- Historique des ventes ---")
-        for vente in resultats:
-            print(f"ID: {vente[0]} | Médicament: {vente[1]} | Client: {vente[2]} {vente[3]} | Qté: {vente[4]} | Total: {vente[5]} € | Date: {vente[6]}")
-
+    rows = cur.fetchall()
     conn.close()
-
+    return rows
