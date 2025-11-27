@@ -111,5 +111,6 @@ def remplir(conn: sqlite3.Connection):
     conn.commit()
     print("Données ajoutées avec succès !")
 
-create_table()
+#create_table()
+
 #remplir(db)
